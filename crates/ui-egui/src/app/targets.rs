@@ -110,14 +110,17 @@ impl PhotocraftApp {
     }
 
     /// Targeting a pixel layer's mask (its thumbnail, or a mask just added to it) takes the
-    /// Channels panel off colour rows left selected and onto the mask, as in Photoshop, so tools,
+    /// Channels panel off colour rows or a vector mask left selected and onto the pixel mask, so tools,
     /// menu commands and the engine all edit the mask. A view change only: no command, no step.
     pub(crate) fn target_mask_over_colour_rows(&mut self) {
         use photocraft_engine::channel_cmds::ChannelTarget;
         let Some(st) = self.session.active_mut() else { return };
         let raster_with_mask =
             st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.mask.is_some() && matches!(l.content, photocraft_doc::LayerContent::Raster(_)));
-        if matches!(st.channel_view.target, ChannelTarget::Color(_)) && photocraft_engine::mask_view_cmds::current(st).is_none() && raster_with_mask {
+        if matches!(st.channel_view.target, ChannelTarget::Color(_) | ChannelTarget::VectorMask)
+            && photocraft_engine::mask_view_cmds::current(st).is_none()
+            && raster_with_mask
+        {
             let v = &mut st.channel_view;
             v.target = ChannelTarget::LayerMask;
             v.selected_colors.clear();

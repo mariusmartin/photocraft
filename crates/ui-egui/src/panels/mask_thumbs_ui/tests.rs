@@ -11,8 +11,12 @@ use crate::PhotocraftApp;
 
 /// A 200×100 document: "Masked" (pixel + vector mask) and a "Badge" shape layer.
 fn session() -> (photocraft_engine::Session, u64, u64) {
+    session_at_depth(8)
+}
+
+fn session_at_depth(depth: u32) -> (photocraft_engine::Session, u64, u64) {
     let mut s = photocraft_engine::Session::new();
-    s.execute("file.new", json!({"width": 200, "height": 100})).unwrap();
+    s.execute("file.new", json!({"width": 200, "height": 100, "depth": depth})).unwrap();
     let masked = s.execute("layer.new.layer", json!({"name": "Masked"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("edit.fill", json!({"contents": "color", "color": "#336699"})).unwrap();
     s.execute("layer.layerMask.revealAll", json!({"layer": masked})).unwrap();
@@ -867,5 +871,28 @@ fn selecting_an_adjustment_layer_from_another_layer_targets_its_mask() {
         click_with(&mut h, at, Modifiers::NONE);
         assert_eq!(h.state().session.active().unwrap().active_layer.unwrap().0, masked);
         assert!(!h.state().ui.mask_target && !h.state().ui.vector_mask_target, "{command}: a pixel layer targets its contents");
+    }
+}
+
+/// #9976: an explicit pixel-mask click must replace a vector-mask channel target.
+#[test]
+fn pixel_mask_thumbnail_replaces_the_vector_mask_channel_before_filling() {
+    for depth in [8, 16, 32] {
+        let (mut s, masked, _) = session_at_depth(depth);
+        s.execute("channel.target", json!({"channel": "vectorMask"})).unwrap();
+        let mut h = harness(s, 0, 1.0, 290.0);
+        let before = layer(&h, masked);
+        let at = mask_rect(&h, masked, MaskKind::Pixel).center();
+        click_with(&mut h, at, Modifiers::NONE);
+        assert!(h.state().layer_mask_targeted(), "{depth}: clicking the mask must target it");
+        h.state_mut().run("edit.fill", json!({"contents": "black"})).unwrap();
+        let filled = layer(&h, masked);
+        assert_eq!(filled.mask.as_ref().unwrap().surface.sample_channel(10, 10, 0), 0.0);
+        h.state_mut().run("paint.stroke", json!({"points": [[10, 10]], "size": 8, "hardness": 1, "color": "#ffffff"})).unwrap();
+        let after = layer(&h, masked);
+        assert_eq!(after.mask.as_ref().unwrap().surface.sample_channel(10, 10, 0), 1.0);
+        assert_eq!(after.mask.as_ref().unwrap().surface.sample_channel(100, 50, 0), 0.0);
+        assert!(after.content == before.content, "{depth}: fill leaves the image untouched");
+        assert!(after.vector_mask == before.vector_mask, "{depth}: fill leaves the vector mask untouched");
     }
 }

@@ -328,7 +328,7 @@ impl PhotocraftApp {
         gpu_status::show_fallback(self, &ctx);
         kys_import::show_offer(self, &ctx);
         if self.titlebar_modal_drag(chrome) {
-            titlebar::modal_drag_overlay(&ctx);
+            titlebar::modal_drag_overlay(self, &ctx);
         }
         if self.custom_titlebar {
             titlebar::resize_zones(ui);

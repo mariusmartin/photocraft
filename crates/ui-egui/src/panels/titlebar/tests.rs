@@ -26,6 +26,7 @@ struct Win {
     width: f32,
     time: f64,
     maximized: bool,
+    fullscreen: bool,
 }
 
 impl Win {
@@ -34,7 +35,7 @@ impl Win {
         PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
         app.custom_titlebar = true;
-        Self { ctx, app, width, time: 0.0, maximized: false }
+        Self { ctx, app, width, time: 0.0, maximized: false, fullscreen: false }
     }
 
     fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
@@ -47,6 +48,7 @@ impl Win {
             RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(self.width, 600.0))), time: Some(self.time), events, ..Default::default() };
         if let Some(v) = input.viewports.get_mut(&ViewportId::ROOT) {
             v.maximized = Some(self.maximized);
+            v.fullscreen = Some(self.fullscreen);
         }
         // What `PhotocraftApp::raw_input_hook` does.
         release_after_os_resize(&self.ctx, &mut input);
@@ -57,7 +59,7 @@ impl Win {
                 egui::Modal::new(Id::unique("titlebar-drag-test-modal")).backdrop_color(Color32::TRANSPARENT).show(ui.ctx(), |ui| {
                     ui.label("Modal dialog");
                 });
-                modal_drag_overlay(ui.ctx());
+                modal_drag_overlay(app, ui.ctx());
             }
             resize_zones(ui);
         });
@@ -488,4 +490,48 @@ fn theme_icons_are_cached_and_fall_back() {
     });
     out.textures_delta.clear();
     assert_eq!(calls.load(Ordering::Relaxed), 3, "each icon and size rendered once; absurd sizes never");
+}
+
+/// Linux #5531: changing maximization while still fullscreen is ignored by the WM.
+#[test]
+fn maximize_and_double_click_leave_fullscreen_before_changing_window_size() {
+    for max in [false, true] {
+        for double_click in [false, true] {
+            let mut w = Win::new(1440.0);
+            w.app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+            w.maximized = max;
+            w.fullscreen = true;
+            w.app.ui.view.screen_mode = "fullScreenWithMenuBar".into();
+            w.app.ui.panels.full_screen_chrome = true;
+            w.frame(vec![]);
+            w.frame(vec![]);
+            let at = if double_click { pos2(980.0, 16.0) } else { w.caption(Caption::Maximize).center() };
+            let mut commands = w.click(at);
+            if double_click {
+                commands.extend(w.click(at));
+            }
+            assert_eq!(w.app.ui.view.screen_mode, "standard");
+            assert!(!w.app.ui.panels.full_screen_chrome);
+            let exit = commands.iter().position(|c| *c == ViewportCommand::Fullscreen(false)).expect("leave fullscreen");
+            let toggle = commands.iter().rposition(|c| *c == ViewportCommand::Maximized(!max)).expect("toggle maximization");
+            assert!(exit < toggle, "leave fullscreen before maximizing/restoring: {commands:?}");
+        }
+    }
+}
+
+#[test]
+fn modal_titlebar_double_click_also_leaves_fullscreen() {
+    let mut w = Win::new(1440.0);
+    w.app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    w.fullscreen = true;
+    w.app.ui.view.screen_mode = "fullScreenWithMenuBar".into();
+    w.frame_with_modal(vec![], true);
+    w.frame_with_modal(vec![], true);
+    let at = pos2(980.0, 16.0);
+    let mut commands = w.gesture_with_modal(&[at], true);
+    commands.extend(w.gesture_with_modal(&[at], true));
+    assert_eq!(w.app.ui.view.screen_mode, "standard");
+    let exit = commands.iter().position(|c| *c == ViewportCommand::Fullscreen(false)).unwrap();
+    let maximize = commands.iter().position(|c| *c == ViewportCommand::Maximized(true)).unwrap();
+    assert!(exit < maximize, "{commands:?}");
 }

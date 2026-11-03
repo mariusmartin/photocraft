@@ -38,8 +38,7 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 crate::titlebar::start_os_move(ui.ctx());
             }
             if drag.double_clicked() {
-                let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                crate::titlebar::toggle_maximize(app, ui.ctx());
             }
             // Preferences › Interface › Show File Name In Title: with it off the bar keeps the
             // app name and the unsaved dot, since the tabs already name the file (#5037).

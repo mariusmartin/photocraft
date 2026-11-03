@@ -60,7 +60,7 @@ pub(crate) fn modal_drag_area_id() -> Id {
 /// Restore window dragging over the title bar's empty gap after a modal has blocked the normal
 /// title-bar layer. The hit target stays limited to the same gap, so menus and caption controls
 /// remain owned by their widgets.
-pub(crate) fn modal_drag_overlay(ctx: &egui::Context) {
+pub(crate) fn modal_drag_overlay(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let Some(area) = ctx.data(|d| d.get_temp::<Rect>(modal_drag_area_id())) else { return };
     if !area.is_positive() || egui::Popup::is_any_open(ctx) || !crate::dialogs::titlebar_drag_area_is_clear(ctx, area) {
         return;
@@ -71,8 +71,7 @@ pub(crate) fn modal_drag_overlay(ctx: &egui::Context) {
             start_os_move(ctx);
         }
         if response.double_clicked() {
-            let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
+            toggle_maximize(app, ctx);
         }
     });
 }
@@ -248,8 +247,14 @@ fn maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false))
 }
 
-fn toggle_maximize(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized(ctx)));
+pub(crate) fn toggle_maximize(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let max = maximized(ctx);
+    // Linux window managers ignore maximize/restore while fullscreen (#5531). Use the
+    // screen-mode command so the native window and the menu/chrome state leave it together.
+    if app.ui.view.screen_mode != "standard" || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+        let _ = crate::menus::invoke(app, ctx, "view.screenMode.standard", json!({}));
+    }
+    ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
 }
 
 /// The caption buttons at the ends of `bar` (the title bar's outer rect), full bar height, flush
@@ -297,7 +302,7 @@ pub fn caption_buttons(app: &mut PhotocraftApp, ui: &mut Ui, bar: Rect) {
     }
     match clicked {
         Some(Caption::Minimize) => ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true)),
-        Some(Caption::Maximize) => toggle_maximize(ui.ctx()),
+        Some(Caption::Maximize) => toggle_maximize(app, ui.ctx()),
         Some(Caption::Close) => {
             let ctx = ui.ctx().clone();
             let _ = crate::menus::invoke(app, &ctx, "file.exit", json!({}));

@@ -7,6 +7,9 @@ use crate::PhotocraftApp;
 
 pub(crate) struct Runtime {
     startup_checked: bool,
+    /// Snap owns the read-only installation and its update lifecycle (#10779).
+    #[cfg(not(target_arch = "wasm32"))]
+    snap_managed: bool,
     notified_version: Option<String>,
     /// The startup prompt and the self-update behind it (desktop).
     #[cfg(not(target_arch = "wasm32"))]
@@ -17,11 +20,23 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             startup_checked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            snap_managed: running_in_snap(),
             notified_version: None,
             #[cfg(not(target_arch = "wasm32"))]
             updater: craft_update::updater::Updater::new(&crate::UPDATE_APP, photocraft_engine::build_info::VERSION),
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn running_in_snap() -> bool {
+    cfg!(target_os = "linux") && snap_environment(std::env::var_os("SNAP").as_deref(), std::env::var_os("SNAP_NAME").as_deref())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn snap_environment(root: Option<&std::ffi::OsStr>, name: Option<&std::ffi::OsStr>) -> bool {
+    root.is_some_and(|root| !root.is_empty()) && name == Some(std::ffi::OsStr::new("photocraft"))
 }
 
 /// The release the engine found, as `craft-update` knows it.
@@ -64,7 +79,9 @@ pub(crate) fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
         app.updates_rt.notified_version = Some(release.version.clone());
         app.ui.updates_open = true;
         #[cfg(not(target_arch = "wasm32"))]
-        app.updates_rt.updater.offer(release_of(release));
+        if !app.updates_rt.snap_managed {
+            app.updates_rt.updater.offer(release_of(release));
+        }
     }
     if app.session.updates.check.is_none() {
         return;
@@ -85,6 +102,40 @@ pub(crate) fn show(_app: &mut PhotocraftApp, _ctx: &egui::Context) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    // Do not offer the binary-replacement updater on Snap's read-only mount. Keep release
+    // checks available, but leave installation and restart to the package manager.
+    if app.updates_rt.snap_managed
+        && let Status::Available { release } = &app.session.updates.status
+    {
+        let url = release.url.clone();
+        let version = release.version.clone();
+        if app.ui.updates_open {
+            let mut open = true;
+            let mut notes = false;
+            let mut close = false;
+            egui::Window::new(tl!("Check for Updates"))
+                .id(egui::Id::unique("snap_update"))
+                .order(egui::Order::Foreground)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    ui.label(crate::i18n::fmt(tl!("PhotoCraft {version} is available."), &[("version", &version)]));
+                    ui.label(tl!("This installation is managed by Snap. Update PhotoCraft through your software center, or close PhotoCraft and run:"));
+                    ui.code("sudo snap refresh photocraft");
+                    ui.horizontal(|ui| {
+                        notes = crate::widgets::secondary_button(ui, tl!("What's new"), 90.0).clicked();
+                        close = crate::widgets::secondary_button(ui, tl!("Close"), 70.0).clicked();
+                    });
+                });
+            app.ui.updates_open = open && !close;
+            if notes {
+                crate::links::open(app, ctx, &url);
+            }
+        }
+        return;
+    }
     let mut download: Option<String> = None;
     {
         let was_open = app.updates_rt.updater.prompt_open();
@@ -165,6 +216,74 @@ mod tests {
     fn at(app: &mut PhotocraftApp, ctx: &egui::Context, time: f64) {
         let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| tick(app, ui.ctx()));
         output.textures_delta.clear();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn snap_release_notification_never_offers_binary_replacement() {
+        let (mut app, _, _) = app();
+        app.updates_rt.snap_managed = true;
+        app.session.updates.status =
+            Status::Available { release: Release { version: "99.0.0".into(), url: "https://github.com/storytold/photocraft/releases/tag/v99.0.0".into() } };
+        let ctx = egui::Context::default();
+        at(&mut app, &ctx, 0.0);
+        assert!(app.ui.updates_open);
+        assert!(!app.updates_rt.updater.prompt_open(), "Snap must never offer the binary replacement updater");
+        app.ui.updates_open = false;
+        at(&mut app, &ctx, 1.0);
+        assert!(!app.ui.updates_open, "dismissed automatic notices stay dismissed");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn snap_notice_shows_package_manager_guidance_and_opens_notes_through_platform() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let (mut app, _, _) = app();
+        let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = opened.clone();
+        app.services.open_url = Some(Box::new(move |url| {
+            recorded.lock().unwrap().push(url.to_owned());
+            Ok(())
+        }));
+        app.updates_rt.snap_managed = true;
+        app.session.updates.status =
+            Status::Available { release: Release { version: "99.0.0".into(), url: "https://github.com/storytold/photocraft/releases/tag/v99.0.0".into() } };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .with_context_setup(|ctx| PhotocraftApp::setup_context(ctx, Default::default()))
+            .build_ui_state(
+                |ui, app: &mut PhotocraftApp| {
+                    tick(app, ui.ctx());
+                    show(app, ui.ctx());
+                },
+                app,
+            );
+        h.run_steps(3);
+        assert!(h.query_by_label("sudo snap refresh photocraft").is_some());
+        assert!(h.query_by_label("UPDATE AND RESTART").is_none());
+        h.get_by_label("What's new").click();
+        h.run_steps(2);
+        assert_eq!(*opened.lock().unwrap(), ["https://github.com/storytold/photocraft/releases/tag/v99.0.0"]);
+        h.get_by_label("Close").click();
+        h.run_steps(2);
+        assert!(!h.state().ui.updates_open);
+        assert!(!h.state().updates_rt.updater.prompt_open());
+        let ctx = h.ctx.clone();
+        menus::invoke(h.state_mut(), &ctx, "help.checkForUpdates", serde_json::json!({})).unwrap();
+        assert!(h.state().ui.updates_open, "manual checks remain available");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn snap_detection_requires_our_package_and_a_nonempty_mount() {
+        use std::ffi::OsStr;
+        let root = Some(OsStr::new("/snap/photocraft/27"));
+        let name = Some(OsStr::new("photocraft"));
+        assert!(snap_environment(root, name));
+        assert!(!snap_environment(None, name));
+        assert!(!snap_environment(Some(OsStr::new("")), name));
+        assert!(!snap_environment(root, None));
+        assert!(!snap_environment(root, Some(OsStr::new("another-app"))));
     }
 
     #[test]
